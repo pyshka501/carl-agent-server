@@ -13,8 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from .chain_source import ChainSnapshot, ChainSource, FileChainSource, MemoryChainSource
+from .cost import run_cost_usd
 from .llm import LLMNotConfiguredError, build_llm_client
-from .models import AgentMeta, DeploymentSpec, RunRecord, ScheduleStatus, StepSummary
+from .models import (
+    AgentMeta,
+    DeploymentSpec,
+    MetricsReport,
+    RunRecord,
+    ScheduleStatus,
+    StepSummary,
+)
 from .run_records import RunRecorder
 from .sessions import SessionStore, compose_chat_input
 from .timeouts import inject_default_timeouts
@@ -121,6 +129,11 @@ class AgentState:
         self._schedule_fire_count = 0
         self._schedule_last_fired: datetime | None = None
         self._schedule_last_run_id: str | None = None
+        # D4 — usage + cost metrics
+        self._metrics_runs = 0
+        self._metrics_status: dict[str, int] = {}
+        self._metrics_tokens = 0
+        self._metrics_cost_usd = 0.0
         self._loaded_once = False
         self._subscription: Any | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -255,6 +268,9 @@ class AgentState:
         if not ok:
             logger.warning("agent %s: skipping scheduled run — not ready (%s)", self.spec.name, reason)
             return None
+        if self.over_budget():
+            logger.warning("agent %s: skipping scheduled run — budget exhausted", self.spec.name)
+            return None
         record = await self.start_run(schedule.input, wait=False)
         self._schedule_fire_count += 1
         self._schedule_last_fired = datetime.now(UTC)
@@ -271,6 +287,56 @@ class AgentState:
             fire_count=self._schedule_fire_count,
             last_fired_at=self._schedule_last_fired,
             last_run_id=self._schedule_last_run_id,
+        )
+
+    # ------------------------------------------------------- metrics (D4)
+    def _record_metrics(self, record: RunRecord) -> None:
+        """Fold one finished run into the usage/cost accumulators. Best-effort:
+        a pricing/usage glitch never fails the run."""
+        self._metrics_runs += 1
+        self._metrics_status[record.status] = self._metrics_status.get(record.status, 0) + 1
+        try:
+            self._metrics_tokens += int(record.token_usage.get("total", 0) or 0)
+            cost = run_cost_usd(
+                record.token_usage,
+                self.spec.price_per_1k_input_usd,
+                self.spec.price_per_1k_output_usd,
+            )
+            record.cost_usd = cost
+            if cost is not None:
+                self._metrics_cost_usd += cost
+        except Exception:  # noqa: BLE001 — metrics are cosmetic
+            logger.warning("agent %s: metrics fold failed", self.spec.name, exc_info=True)
+
+    def pricing_configured(self) -> bool:
+        return (
+            self.spec.price_per_1k_input_usd is not None
+            and self.spec.price_per_1k_output_usd is not None
+        )
+
+    def over_budget(self) -> bool:
+        """True when a USD budget is set, priced, and already spent."""
+        if self.spec.budget_usd is None or not self.pricing_configured():
+            return False
+        return self._metrics_cost_usd >= self.spec.budget_usd
+
+    def metrics_report(self) -> MetricsReport:
+        priced = self.pricing_configured()
+        total_cost = self._metrics_cost_usd if priced else None
+        remaining = (
+            max(0.0, self.spec.budget_usd - self._metrics_cost_usd)
+            if (self.spec.budget_usd is not None and priced)
+            else None
+        )
+        return MetricsReport(
+            run_count=self._metrics_runs,
+            status_counts=dict(self._metrics_status),
+            total_tokens=self._metrics_tokens,
+            total_cost_usd=total_cost,
+            pricing_configured=priced,
+            budget_usd=self.spec.budget_usd,
+            remaining_usd=remaining,
+            over_budget=self.over_budget(),
         )
 
     def _on_source_event(self, _record: Any = None) -> None:
@@ -504,6 +570,7 @@ class AgentState:
             handle.awaiting_input = False
             record.awaiting_input = None  # cleared at any terminal state
             record.finished_at = datetime.now(UTC)
+            self._record_metrics(record)  # D4: fold cost/usage before emit
             await handle.emit("result", record.model_dump(mode="json"))
             # after the result event: SSE consumers never wait on Memory I/O
             recorder = self._get_recorder()

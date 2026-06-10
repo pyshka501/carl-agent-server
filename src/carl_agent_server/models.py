@@ -87,6 +87,19 @@ class DeploymentSpec(BaseModel):
         description="Auto-invoke the chain on a fixed interval (D3). None = no schedule.",
     )
 
+    price_per_1k_input_usd: float | None = Field(
+        default=None, ge=0, description="USD per 1k input tokens (cost tracking; D4)"
+    )
+    price_per_1k_output_usd: float | None = Field(
+        default=None, ge=0, description="USD per 1k output tokens (cost tracking; D4)"
+    )
+    budget_usd: float | None = Field(
+        default=None,
+        gt=0,
+        description="Total USD spend cap; further runs are refused (402) once reached. "
+        "Needs pricing to take effect.",
+    )
+
     memory_url: str | None = Field(default=None, description="Memory API base URL; falls back to AGENT_MEMORY_URL")
     memory_api_key: str | None = Field(default=None, description="Memory API key; falls back to AGENT_MEMORY_API_KEY")
 
@@ -135,6 +148,7 @@ class RunRecord(BaseModel):
     answer: str | None = None
     error: str | None = None
     token_usage: dict[str, int] = Field(default_factory=dict)
+    cost_usd: float | None = Field(default=None, description="Run cost in USD when pricing is configured (D4)")
     execution_time_s: float | None = None
     steps: list[StepSummary] = Field(default_factory=list)
     awaiting_input: dict[str, Any] | None = Field(
@@ -162,6 +176,19 @@ class ScheduleStatus(BaseModel):
     fire_count: int = 0
     last_fired_at: datetime | None = None
     last_run_id: str | None = None
+
+
+class MetricsReport(BaseModel):
+    """Usage + cost metrics for one deployment (D4)."""
+
+    run_count: int = 0
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    total_tokens: int = 0
+    total_cost_usd: float | None = None
+    pricing_configured: bool = False
+    budget_usd: float | None = None
+    remaining_usd: float | None = None
+    over_budget: bool = False
 
 
 class ChatRequest(BaseModel):

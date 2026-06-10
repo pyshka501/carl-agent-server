@@ -26,6 +26,7 @@ from .models import (
     DeploymentSpec,
     HumanInputRequest,
     InvokeRequest,
+    MetricsReport,
     RunRecord,
     ScheduleStatus,
 )
@@ -101,12 +102,19 @@ def build_agent_app(
         """The deployment's auto-invoke schedule and its firing stats (D3)."""
         return state.schedule_status()
 
+    @app.get("/metrics", response_model=MetricsReport, tags=["service"])
+    async def get_metrics() -> MetricsReport:
+        """Usage + cost metrics for this deployment (D4): run counts, total
+        tokens, total USD cost (when priced), budget + remaining."""
+        return state.metrics_report()
+
     @app.post("/schedule/trigger", response_model=RunRecord, tags=["agent"], dependencies=[require_key])
     async def trigger_schedule() -> Any:
         """Fire one scheduled run immediately (manual trigger). 404 when no
         schedule is configured, 503 when the agent is not ready."""
         if state.spec.schedule is None:
             raise HTTPException(status_code=404, detail="no schedule configured")
+        _guard_budget(state)
         record = await state.fire_scheduled()
         if record is None:
             _, reason = state.ready
@@ -122,6 +130,7 @@ def build_agent_app(
         ok, reason = state.ready
         if not ok:
             raise HTTPException(status_code=503, detail=f"agent is not ready: {reason}")
+        _guard_budget(state)
         if mode == "async":
             record = await state.start_run(request.input, wait=False)
             return JSONResponse(record.model_dump(mode="json"), status_code=202)
@@ -137,6 +146,7 @@ def build_agent_app(
         ok, reason = state.ready
         if not ok:
             raise HTTPException(status_code=503, detail=f"agent is not ready: {reason}")
+        _guard_budget(state)
         session_id, record, turn_count = await state.chat(request.message, request.session_id)
         return ChatResponse(
             session_id=session_id,
@@ -196,6 +206,15 @@ def build_agent_app(
         return {"run_id": run_id, "status": "cancelling"}
 
     return app
+
+
+def _guard_budget(state: AgentState) -> None:
+    """Refuse a new run once the deployment's USD budget is spent (D4 → 402)."""
+    if state.over_budget():
+        raise HTTPException(
+            status_code=402,
+            detail=f"deployment budget of ${state.spec.budget_usd:.2f} exhausted",
+        )
 
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})

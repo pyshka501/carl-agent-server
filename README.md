@@ -72,6 +72,7 @@ uv run carl-agent serve --chain-file ./chain.json --name demo --port 8001
 | `DELETE /runs/{id}` | cooperative cancel of a running run |
 | `GET /schedule` | the deployment's auto-invoke schedule + firing stats (D3) |
 | `POST /schedule/trigger` | fire one scheduled run now (manual trigger) |
+| `GET /metrics` | usage + cost: run counts, total tokens, total USD, budget + remaining (D4) |
 | `GET /info` | agent card (name, version, channel, required tools, readiness) |
 | `GET /healthz` / `GET /readyz` | liveness / readiness (with the reason when 503) |
 | `GET /docs` | this agent's own Swagger |
@@ -115,6 +116,15 @@ lifecycle-bound (starts on activation, stops on shutdown; survives a single
 run's failure, skips ticks while not ready). `GET /schedule` reports it,
 `POST /schedule/trigger` fires one run now. For external cron/batch use
 `care run` instead; an inbound HTTP trigger is just `POST /invoke`.
+
+## Cost & budgets
+
+Set per-1k token prices on the deployment (`price_per_1k_input_usd`,
+`price_per_1k_output_usd`) and each run's USD cost is computed from its token
+usage and stamped on the run record; `GET /metrics` reports run counts, total
+tokens and total spend. An optional `budget_usd` cap refuses further runs with
+**402** once spent (needs pricing to take effect; the scheduler skips ticks
+while over budget).
 
 ## Tools
 
