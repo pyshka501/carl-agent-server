@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+__MACOSX/
+
+# Local state
+*.log
+agent-hub.json
