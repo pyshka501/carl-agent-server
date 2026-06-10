@@ -15,6 +15,7 @@ from .llm import LLMNotConfiguredError, build_llm_client
 from .models import AgentMeta, DeploymentSpec, RunRecord, StepSummary
 from .run_records import RunRecorder
 from .sessions import SessionStore, compose_chat_input
+from .timeouts import inject_default_timeouts
 from .tools import register_builtin_tools
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,12 @@ class AgentState:
     def _parse_and_preflight(self, snapshot: ChainSnapshot) -> tuple[Any, list[str], list[str]]:
         from mmar_carl import ReasoningChain
 
-        chain = ReasoningChain.from_dict(dict(snapshot.content), use_typed_steps=True)
+        # C6/G9: fill in default chain-level + per-step timeouts (never looser
+        # than the author's). Cold load and hot-reload share this path.
+        content = inject_default_timeouts(
+            snapshot.content, step_timeout_s=self.spec.step_timeout_s
+        )
+        chain = ReasoningChain.from_dict(content, use_typed_steps=True)
         probe = self._build_context("preflight probe", api=_NullLLM())
         report = chain.preflight(probe)
         required = list(report.required_tools or [])

@@ -95,6 +95,15 @@ open. Loopback requests (127.0.0.1/::1) skip the check unless
 Solo: `carl-agent serve --api-key <key>` (or `AGENT_API_KEY`). The hub's
 state file holds these keys and is written `chmod 600`.
 
+## Timeouts
+
+Two layers bound a run. `chain_timeout_s` (default 300s) is the agent's hard
+wall-clock deadline for the whole run. `step_timeout_s` (default 60s) is a
+default per-step timeout injected at load into any step the author left
+unbounded — capped never to exceed the chain-level `timeout`, so it tightens
+but never loosens authored intent. Together a single hung step fails fast at
+the step level instead of burning the whole run budget.
+
 ## Tools
 
 Deployed agents ship a **read-only** builtin tool set: `calculator`,

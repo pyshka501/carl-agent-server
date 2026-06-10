@@ -36,6 +36,15 @@ class DeploymentSpec(BaseModel):
     llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
 
     chain_timeout_s: float = Field(default=300.0, gt=0, description="Hard deadline for one chain run")
+    step_timeout_s: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Default per-step timeout injected at load into steps without one "
+            "(capped never to exceed the chain-level timeout). Bounds a single "
+            "hung step well inside chain_timeout_s."
+        ),
+    )
 
     session_ttl_s: float = Field(
         default=1800.0, gt=0, description="Idle lifetime of a /chat session before eviction"
