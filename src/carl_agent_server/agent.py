@@ -1,4 +1,4 @@
-"""AgentState — one chain behind an HTTP facade: load, preflight, invoke, run store."""
+"""AgentState — one chain behind an HTTP facade: load, preflight, runs (sync/async/SSE/cancel)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from collections import OrderedDict
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +26,51 @@ class _NullLLM:
 
     async def get_response(self, *args: Any, **kwargs: Any) -> str:
         raise LLMNotConfiguredError("LLM is not configured")
+
+
+class RunHandle:
+    """A live run: its record, step-event log for SSE, and the cancel lever.
+
+    Events are kept for the run's lifetime, so a late SSE subscriber replays
+    the full step history before tailing new events.
+    """
+
+    def __init__(self, record: RunRecord) -> None:
+        self.record = record
+        self.context: Any | None = None
+        self.task: asyncio.Task[None] | None = None
+        self.cancel_requested = False
+        self.events: list[dict[str, Any]] = []
+        self.finished = False
+        self._cond = asyncio.Condition()
+
+    async def emit(self, event: str, data: dict[str, Any]) -> None:
+        async with self._cond:
+            self.events.append({"event": event, "data": data})
+            if event == "result":
+                self.finished = True
+            self._cond.notify_all()
+
+    async def stream(self) -> AsyncIterator[dict[str, Any]]:
+        """Replay existing events, then tail until the terminal ``result`` event."""
+        index = 0
+        while True:
+            async with self._cond:
+                while index >= len(self.events) and not self.finished:
+                    await self._cond.wait()
+                if index >= len(self.events):
+                    return
+                event = self.events[index]
+                index += 1
+            yield event
+            if event["event"] == "result":
+                return
+
+    def request_cancel(self) -> None:
+        """Cooperative cancel: CARL's executor stops between batches."""
+        self.cancel_requested = True
+        if self.context is not None:
+            self.context.cancel()
 
 
 class AgentState:
@@ -52,6 +98,7 @@ class AgentState:
         self.load_error: str | None = None
         self.loaded_at: datetime | None = None
         self.runs: OrderedDict[str, RunRecord] = OrderedDict()
+        self.handles: dict[str, RunHandle] = {}
         self._swap_lock = asyncio.Lock()
         self._loaded_once = False
 
@@ -101,9 +148,9 @@ class AgentState:
         probe = self._build_context("preflight probe", api=_NullLLM())
         report = chain.preflight(probe)
         required = list(report.required_tools or [])
-        missing = [f"tool:{t}" for t in report.missing_tools or []]
-        missing += [f"mcp:{s}" for s in report.missing_mcp_servers or []]
-        missing += [f"skill:{s}" for s in report.missing_skills or []]
+        missing = [f"tool:{name}" for name in report.missing_tools or []]
+        missing += [f"mcp:{name}" for name in report.missing_mcp_servers or []]
+        missing += [f"skill:{name}" for name in report.missing_skills or []]
         return chain, required, missing
 
     # ----------------------------------------------------------------- state
@@ -140,22 +187,44 @@ class AgentState:
         return user_input
 
     # ----------------------------------------------------------------- runs
-    async def invoke(self, user_input: str) -> RunRecord:
-        """Execute one chain run with the deployment's hard timeout; always returns a record."""
+    async def start_run(self, user_input: str, *, wait: bool) -> RunRecord:
+        """Start one chain run. ``wait=True`` (sync invoke) awaits completion;
+        ``wait=False`` (async invoke) returns the running record immediately."""
         record = RunRecord(input=user_input)
-        self._remember(record)
+        handle = RunHandle(record)
+        self._remember(record, handle)
         async with self._swap_lock:
             chain = self.chain
-        if chain is None:  # guarded by the endpoint, kept as a hard backstop
+        if chain is None:  # guarded by the endpoint; hard backstop
             record.status = "failed"
             record.success = False
             record.error = self.load_error or "chain is not loaded"
             record.finished_at = datetime.now(UTC)
+            await handle.emit("result", record.model_dump(mode="json"))
             return record
-        ctx = self._build_context(self._render_input(user_input))
+        context = self._build_context(self._render_input(user_input))
+        handle.context = context
+        handle.task = asyncio.create_task(self._execute(handle, chain, context))
+        if wait:
+            await asyncio.shield(handle.task)
+        return record
+
+    async def _execute(self, handle: RunHandle, chain: Any, context: Any) -> None:
+        """Drive one run via ``stream_async``: step events feed SSE, the terminal
+        ReasoningResult fills the record. Hard deadline = spec.chain_timeout_s."""
+        record = handle.record
+        final: Any | None = None
         try:
-            result = await asyncio.wait_for(chain.execute_async(ctx), timeout=self.spec.chain_timeout_s)
+            async with asyncio.timeout(self.spec.chain_timeout_s):
+                async for item in chain.stream_async(context):
+                    if _is_terminal_result(item):
+                        final = item
+                        continue
+                    summary = _summarize_step(item)
+                    record.steps.append(summary)
+                    await handle.emit("step", summary.model_dump(mode="json"))
         except TimeoutError:
+            handle.request_cancel()
             record.status = "timeout"
             record.success = False
             record.error = f"chain run exceeded {self.spec.chain_timeout_s:.0f}s"
@@ -164,20 +233,38 @@ class AgentState:
             record.success = False
             record.error = f"{type(exc).__name__}: {exc}"
         else:
-            record.success = bool(result.success)
-            record.status = "succeeded" if record.success else "failed"
-            record.answer = result.get_final_output()
-            record.error = getattr(result, "error_message", None)
-            record.token_usage = {k: int(v) for k, v in (getattr(result, "token_usage", {}) or {}).items()}
-            record.execution_time_s = getattr(result, "execution_time", None)
-            record.steps = [_summarize_step(s) for s in getattr(result, "step_results", []) or []]
-        record.finished_at = datetime.now(UTC)
-        return record
+            if final is not None:
+                record.success = bool(final.success)
+                record.status = "succeeded" if record.success else "failed"
+                record.answer = final.get_final_output()
+                record.error = getattr(final, "error_message", None)
+                record.token_usage = {k: int(v) for k, v in (getattr(final, "token_usage", {}) or {}).items()}
+                record.execution_time_s = getattr(final, "execution_time", None)
+            else:
+                record.status = "failed"
+                record.success = False
+                record.error = record.error or "chain produced no result"
+            if handle.cancel_requested:
+                record.status = "cancelled"
+                record.success = False
+                record.error = record.error or "run cancelled"
+        finally:
+            if handle.cancel_requested and record.status not in ("succeeded",):
+                record.status = "cancelled" if record.status != "timeout" else "timeout"
+            record.finished_at = datetime.now(UTC)
+            await handle.emit("result", record.model_dump(mode="json"))
 
-    def _remember(self, record: RunRecord) -> None:
+    def _remember(self, record: RunRecord, handle: RunHandle) -> None:
         self.runs[record.run_id] = record
+        self.handles[record.run_id] = handle
         while len(self.runs) > _MAX_RUNS_KEPT:
-            self.runs.popitem(last=False)
+            old_id, _ = self.runs.popitem(last=False)
+            self.handles.pop(old_id, None)
+
+
+def _is_terminal_result(item: Any) -> bool:
+    """stream_async yields StepExecutionResult per step, then one ReasoningResult."""
+    return hasattr(item, "step_results")
 
 
 def _summarize_step(step: Any) -> StepSummary:

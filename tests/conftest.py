@@ -47,14 +47,22 @@ SAMPLE_CHAIN: dict[str, Any] = {
 
 
 class MockLLM:
-    """Minimal stub mmar-carl auto-detects as an LLM client (has get_response)."""
+    """Minimal stub mmar-carl auto-detects as an LLM client (has get_response).
 
-    def __init__(self, answers: list[str] | None = None) -> None:
+    ``delay`` makes each call slow — used by the cancel/timeout tests.
+    """
+
+    def __init__(self, answers: list[str] | None = None, delay: float = 0.0) -> None:
         self.answers = answers or ["step-1 reasoning", "FINAL ANSWER 42"]
+        self.delay = delay
         self.calls: list[str] = []
 
     async def get_response(self, prompt: str, *args: Any, **kwargs: Any) -> str:
         self.calls.append(prompt)
+        if self.delay:
+            import asyncio
+
+            await asyncio.sleep(self.delay)
         return self.answers[min(len(self.calls) - 1, len(self.answers) - 1)]
 
     async def get_response_with_retries(self, prompt: str, *args: Any, **kwargs: Any) -> str:

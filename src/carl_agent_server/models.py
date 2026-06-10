@@ -70,7 +70,7 @@ class StepSummary(BaseModel):
     error: str | None = None
 
 
-RunStatus = Literal["running", "succeeded", "failed", "timeout"]
+RunStatus = Literal["running", "succeeded", "failed", "timeout", "cancelled"]
 
 
 class RunRecord(BaseModel):

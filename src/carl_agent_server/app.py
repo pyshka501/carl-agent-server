@@ -10,11 +10,12 @@ the same /docs under /agents/<name>/docs out of the box.
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .agent import AgentState
 from .models import AgentInfo, DeploymentSpec, InvokeRequest, RunRecord
@@ -81,12 +82,18 @@ def build_agent_app(
         )
 
     @app.post("/invoke", response_model=RunRecord, tags=["agent"])
-    async def invoke(request: InvokeRequest) -> RunRecord:
+    async def invoke(request: InvokeRequest, mode: Literal["sync", "async"] = "sync") -> Any:
+        """Run the chain. ``mode=sync`` waits for the result; ``mode=async``
+        returns 202 with a running record — poll /runs/{id} or stream
+        /runs/{id}/events."""
         await state.ensure_loaded()
         ok, reason = state.ready
         if not ok:
             raise HTTPException(status_code=503, detail=f"agent is not ready: {reason}")
-        return await state.invoke(request.input)
+        if mode == "async":
+            record = await state.start_run(request.input, wait=False)
+            return JSONResponse(record.model_dump(mode="json"), status_code=202)
+        return await state.start_run(request.input, wait=True)
 
     @app.get("/runs/{run_id}", response_model=RunRecord, tags=["agent"])
     async def get_run(run_id: str) -> RunRecord:
@@ -94,6 +101,33 @@ def build_agent_app(
         if record is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
         return record
+
+    @app.get("/runs/{run_id}/events", tags=["agent"])
+    async def run_events(run_id: str) -> StreamingResponse:
+        """Server-Sent Events: replays completed steps, tails live ones, ends
+        with the terminal ``result`` event. Disconnecting stops the stream but
+        does NOT cancel the run — use DELETE /runs/{id} for that."""
+        handle = state.handles.get(run_id)
+        if handle is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+
+        async def gen() -> Any:
+            async for event in handle.stream():
+                payload = json.dumps(event["data"], ensure_ascii=False)
+                yield f"event: {event['event']}\ndata: {payload}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.delete("/runs/{run_id}", tags=["agent"])
+    async def cancel_run(run_id: str) -> dict[str, str]:
+        """Cooperatively cancel a running run (CARL stops between step batches)."""
+        handle = state.handles.get(run_id)
+        if handle is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        if handle.record.status != "running":
+            raise HTTPException(status_code=409, detail=f"run is already {handle.record.status}")
+        handle.request_cancel()
+        return {"run_id": run_id, "status": "cancelling"}
 
     return app
 
