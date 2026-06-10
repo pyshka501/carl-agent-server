@@ -11,10 +11,11 @@ the same /docs under /agents/<name>/docs out of the box.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .agent import AgentState
@@ -60,6 +61,7 @@ def build_agent_app(
         redoc_url=None,
     )
     app.state.agent = state
+    require_key = Depends(_make_auth_dependency(spec))
 
     @app.get("/healthz", tags=["service"])
     async def healthz() -> dict[str, str]:
@@ -92,7 +94,7 @@ def build_agent_app(
             ready_reason=reason,
         )
 
-    @app.post("/invoke", response_model=RunRecord, tags=["agent"])
+    @app.post("/invoke", response_model=RunRecord, tags=["agent"], dependencies=[require_key])
     async def invoke(request: InvokeRequest, mode: Literal["sync", "async"] = "sync") -> Any:
         """Run the chain. ``mode=sync`` waits for the result; ``mode=async``
         returns 202 with a running record — poll /runs/{id} or stream
@@ -106,7 +108,7 @@ def build_agent_app(
             return JSONResponse(record.model_dump(mode="json"), status_code=202)
         return await state.start_run(request.input, wait=True)
 
-    @app.post("/chat", response_model=ChatResponse, tags=["agent"])
+    @app.post("/chat", response_model=ChatResponse, tags=["agent"], dependencies=[require_key])
     async def chat(request: ChatRequest) -> ChatResponse:
         """Hold a conversation with the agent. Omit ``session_id`` to start a
         new session (the reply carries the id); pass it back to continue — the
@@ -126,14 +128,14 @@ def build_agent_app(
             turn_count=turn_count,
         )
 
-    @app.get("/runs/{run_id}", response_model=RunRecord, tags=["agent"])
+    @app.get("/runs/{run_id}", response_model=RunRecord, tags=["agent"], dependencies=[require_key])
     async def get_run(run_id: str) -> RunRecord:
         record = state.runs.get(run_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
         return record
 
-    @app.get("/runs/{run_id}/events", tags=["agent"])
+    @app.get("/runs/{run_id}/events", tags=["agent"], dependencies=[require_key])
     async def run_events(run_id: str) -> StreamingResponse:
         """Server-Sent Events: replays completed steps, tails live ones, ends
         with the terminal ``result`` event. Disconnecting stops the stream but
@@ -149,7 +151,7 @@ def build_agent_app(
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
-    @app.delete("/runs/{run_id}", tags=["agent"])
+    @app.delete("/runs/{run_id}", tags=["agent"], dependencies=[require_key])
     async def cancel_run(run_id: str) -> dict[str, str]:
         """Cooperatively cancel a running run (CARL stops between step batches)."""
         handle = state.handles.get(run_id)
@@ -161,6 +163,36 @@ def build_agent_app(
         return {"run_id": run_id, "status": "cancelling"}
 
     return app
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _make_auth_dependency(spec: DeploymentSpec) -> Callable[[Request], None]:
+    """Build the per-agent API-key check for the protected routes.
+
+    No ``api_key`` → auth disabled (localhost demo). With one set, the request
+    must carry it via ``X-API-Key`` or ``Authorization: Bearer``; loopback
+    requests are waved through when ``auth_allow_localhost`` (local dev). Open
+    routes (/healthz /readyz /info /docs) never get this dependency.
+    """
+
+    def verify(request: Request) -> None:
+        key = spec.api_key
+        if not key:
+            return
+        client_host = request.client.host if request.client else None
+        if spec.auth_allow_localhost and client_host in _LOOPBACK_HOSTS:
+            return
+        provided = request.headers.get("x-api-key")
+        if not provided:
+            authorization = request.headers.get("authorization", "")
+            if authorization.lower().startswith("bearer "):
+                provided = authorization[7:].strip()
+        if provided != key:
+            raise HTTPException(status_code=401, detail="missing or invalid API key")
+
+    return verify
 
 
 async def activate_agent_app(app: FastAPI) -> AgentState:

@@ -85,6 +85,16 @@ Per-deployment overrides (`llm_model`, `llm_api_key`, `memory_url`, …) exist o
 the deployment spec, but prefer env vars: hub specs persist to the state file
 verbatim, and secrets belong in the environment, not on disk.
 
+## Auth
+
+Set a per-agent `api_key` on the deployment (CARE's `/deploy` generates one)
+and `/invoke`, `/chat`, `/runs/*` require it via `X-API-Key: <key>` (or
+`Authorization: Bearer <key>`); `/healthz`, `/readyz`, `/info`, `/docs` stay
+open. Loopback requests (127.0.0.1/::1) skip the check unless
+`auth_allow_localhost=false`. No `api_key` set → auth is off (localhost demo).
+Solo: `carl-agent serve --api-key <key>` (or `AGENT_API_KEY`). The hub's
+state file holds these keys and is written `chmod 600`.
+
 ## Tools
 
 Deployed agents ship a **read-only** builtin tool set: `calculator`,

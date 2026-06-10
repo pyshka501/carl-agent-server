@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -158,6 +159,11 @@ class AgentHub:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state_file.with_suffix(".json.tmp")
         tmp.write_text(payload, encoding="utf-8")
+        # The state file holds per-agent API keys — keep it owner-only.
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:  # pragma: no cover - non-POSIX
+            logger.debug("hub: could not chmod state file", exc_info=True)
         tmp.replace(self.state_file)
 
 

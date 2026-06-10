@@ -44,6 +44,19 @@ class DeploymentSpec(BaseModel):
         default=6, ge=0, description="Prior turns fed into the chain on each /chat message"
     )
 
+    api_key: str | None = Field(
+        default=None,
+        description=(
+            "Per-agent API key. When set, /invoke /chat and /runs require it via "
+            "`X-API-Key` (or `Authorization: Bearer`); /healthz /readyz /info /docs "
+            "stay open. None disables auth (localhost demo)."
+        ),
+    )
+    auth_allow_localhost: bool = Field(
+        default=True,
+        description="Loopback (127.0.0.1/::1) requests skip the API-key check — for local dev/demo.",
+    )
+
     memory_url: str | None = Field(default=None, description="Memory API base URL; falls back to AGENT_MEMORY_URL")
     memory_api_key: str | None = Field(default=None, description="Memory API key; falls back to AGENT_MEMORY_API_KEY")
 

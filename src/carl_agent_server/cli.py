@@ -44,6 +44,11 @@ def main(argv: list[str] | None = None) -> None:
     source.add_argument("--entity-id", help="Memory chain entity id (attached mode)")
     serve.add_argument("--channel", default="stable", help="Memory channel to follow (attached mode)")
     serve.add_argument("--memory-url", default=os.environ.get("AGENT_MEMORY_URL"))
+    serve.add_argument(
+        "--api-key",
+        default=os.environ.get("AGENT_API_KEY"),
+        help="Require this API key on /invoke /chat /runs (env: AGENT_API_KEY).",
+    )
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8001)
 
@@ -54,6 +59,7 @@ def main(argv: list[str] | None = None) -> None:
         entity_id=args.entity_id,
         channel=args.channel,
         memory_url=args.memory_url,
+        api_key=args.api_key,
     )
     uvicorn.run(build_agent_app(spec), host=args.host, port=args.port)
 
