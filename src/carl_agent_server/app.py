@@ -18,7 +18,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .agent import AgentState
-from .models import AgentInfo, DeploymentSpec, InvokeRequest, RunRecord
+from .models import (
+    AgentInfo,
+    ChatRequest,
+    ChatResponse,
+    DeploymentSpec,
+    InvokeRequest,
+    RunRecord,
+)
 
 
 def build_agent_app(
@@ -98,6 +105,26 @@ def build_agent_app(
             record = await state.start_run(request.input, wait=False)
             return JSONResponse(record.model_dump(mode="json"), status_code=202)
         return await state.start_run(request.input, wait=True)
+
+    @app.post("/chat", response_model=ChatResponse, tags=["agent"])
+    async def chat(request: ChatRequest) -> ChatResponse:
+        """Hold a conversation with the agent. Omit ``session_id`` to start a
+        new session (the reply carries the id); pass it back to continue — the
+        dialogue so far is fed into the chain each turn (the chain is
+        unchanged). Sessions evict after the deployment's idle TTL."""
+        await state.ensure_loaded()
+        ok, reason = state.ready
+        if not ok:
+            raise HTTPException(status_code=503, detail=f"agent is not ready: {reason}")
+        session_id, record, turn_count = await state.chat(request.message, request.session_id)
+        return ChatResponse(
+            session_id=session_id,
+            run_id=record.run_id,
+            status=record.status,
+            answer=record.answer,
+            error=record.error,
+            turn_count=turn_count,
+        )
 
     @app.get("/runs/{run_id}", response_model=RunRecord, tags=["agent"])
     async def get_run(run_id: str) -> RunRecord:

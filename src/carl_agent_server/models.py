@@ -37,6 +37,13 @@ class DeploymentSpec(BaseModel):
 
     chain_timeout_s: float = Field(default=300.0, gt=0, description="Hard deadline for one chain run")
 
+    session_ttl_s: float = Field(
+        default=1800.0, gt=0, description="Idle lifetime of a /chat session before eviction"
+    )
+    session_history_turns: int = Field(
+        default=6, ge=0, description="Prior turns fed into the chain on each /chat message"
+    )
+
     memory_url: str | None = Field(default=None, description="Memory API base URL; falls back to AGENT_MEMORY_URL")
     memory_api_key: str | None = Field(default=None, description="Memory API key; falls back to AGENT_MEMORY_API_KEY")
 
@@ -91,6 +98,25 @@ class RunRecord(BaseModel):
 
 class InvokeRequest(BaseModel):
     input: str = Field(..., min_length=1, description="The task / question for the agent")
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, description="The user's message in the conversation")
+    session_id: str | None = Field(
+        default=None,
+        description="Continue an existing session; omit to start a new one (id returned in the reply)",
+    )
+
+
+class ChatResponse(BaseModel):
+    """One conversational exchange with a deployed agent."""
+
+    session_id: str
+    run_id: str
+    status: RunStatus
+    answer: str | None = None
+    error: str | None = None
+    turn_count: int = 0
 
 
 class DeploymentInfo(BaseModel):

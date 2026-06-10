@@ -14,6 +14,7 @@ from .chain_source import ChainSnapshot, ChainSource, FileChainSource, MemoryCha
 from .llm import LLMNotConfiguredError, build_llm_client
 from .models import AgentMeta, DeploymentSpec, RunRecord, StepSummary
 from .run_records import RunRecorder
+from .sessions import SessionStore, compose_chat_input
 from .tools import register_builtin_tools
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,9 @@ class AgentState:
         self.loaded_at: datetime | None = None
         self.runs: OrderedDict[str, RunRecord] = OrderedDict()
         self.handles: dict[str, RunHandle] = {}
+        self.sessions = SessionStore(
+            ttl_seconds=spec.session_ttl_s, max_turns=spec.session_history_turns
+        )
         self.on_reloaded: list[Callable[[], None]] = []
         self._swap_lock = asyncio.Lock()
         self._reload_lock = asyncio.Lock()
@@ -297,6 +301,24 @@ class AgentState:
         if wait:
             await asyncio.shield(handle.task)
         return record
+
+    async def chat(self, message: str, session_id: str | None) -> tuple[str, RunRecord, int]:
+        """One conversational turn (history-in-context, C3).
+
+        The session's prior turns are rendered into the chain input; the chain
+        runs synchronously; a successful exchange is appended to the session.
+        Returns ``(session_id, run_record, turn_count)``. The chain is
+        unchanged — only its ``outer_context`` carries the conversation.
+        """
+        session = self.sessions.get_or_create(session_id)
+        composed = compose_chat_input(session.turns, message)
+        record = await self.start_run(composed, wait=True)
+        if record.success and record.answer is not None:
+            updated = self.sessions.append_turn(session.session_id, message, record.answer)
+            turn_count = len(updated.turns)
+        else:
+            turn_count = len(session.turns)
+        return session.session_id, record, turn_count
 
     async def _execute(self, handle: RunHandle, chain: Any, context: Any) -> None:
         """Drive one run via ``stream_async``: step events feed SSE, the terminal
