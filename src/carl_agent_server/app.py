@@ -37,9 +37,15 @@ def build_agent_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # the hook keeps /docs metadata in sync across hot-reloads (A3)
+        state.on_reloaded.append(lambda: refresh_app_meta(app, state))
         await state.ensure_loaded()
         refresh_app_meta(app, state)
-        yield
+        state.start_watch()
+        try:
+            yield
+        finally:
+            state.stop_watch()
 
     app = FastAPI(
         title=spec.name,

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -99,8 +99,12 @@ class AgentState:
         self.loaded_at: datetime | None = None
         self.runs: OrderedDict[str, RunRecord] = OrderedDict()
         self.handles: dict[str, RunHandle] = {}
+        self.on_reloaded: list[Callable[[], None]] = []
         self._swap_lock = asyncio.Lock()
+        self._reload_lock = asyncio.Lock()
         self._loaded_once = False
+        self._subscription: Any | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------- lifecycle
     @staticmethod
@@ -121,8 +125,20 @@ class AgentState:
     async def reload(self) -> bool:
         """(Re)load the chain from its source. Returns True if the new chain went live.
 
-        On any failure the previous chain (if any) stays serving.
+        Serialized (concurrent watcher events queue up) and swap-safe: on any
+        failure the previous chain (if any) stays serving.
         """
+        async with self._reload_lock:
+            went_live = await self._reload_inner()
+        if went_live:
+            for hook in list(self.on_reloaded):
+                try:
+                    hook()
+                except Exception:
+                    logger.exception("agent %s: on_reloaded hook failed", self.spec.name)
+        return went_live
+
+    async def _reload_inner(self) -> bool:
         self._loaded_once = True
         try:
             snapshot = await asyncio.to_thread(self._source.load)
@@ -130,6 +146,18 @@ class AgentState:
         except Exception as exc:
             self.load_error = f"{type(exc).__name__}: {exc}"
             logger.warning("agent %s: reload failed, keeping previous chain (%s)", self.spec.name, self.load_error)
+            return False
+        if missing and self.chain is not None:
+            # Preflight canary: a hot-reloaded version with unmet dependencies must
+            # not evict a healthy serving chain. (On FIRST load we do accept it, so
+            # /readyz can report exactly what is missing.)
+            logger.warning(
+                "agent %s: rejecting %s — preflight missing %s; keeping %s",
+                self.spec.name,
+                snapshot.meta.version_label,
+                ", ".join(missing),
+                self.meta.version_label,
+            )
             return False
         async with self._swap_lock:
             self.chain = chain
@@ -140,6 +168,47 @@ class AgentState:
             self.loaded_at = datetime.now(UTC)
         logger.info("agent %s: serving %s (%s)", self.spec.name, self.meta.display_name, self.meta.version_label)
         return True
+
+    # ------------------------------------------------------------ hot-reload
+    def start_watch(self) -> bool:
+        """Subscribe to source events (attached mode) for promote/pin hot-reload.
+
+        Returns True if a watcher is now active. File sources have nothing to
+        watch; calling twice is a no-op. Must be called from a running loop —
+        watcher events arrive on a background thread and are bridged back via
+        ``run_coroutine_threadsafe``.
+        """
+        watch = getattr(self._source, "watch", None)
+        if watch is None or self._subscription is not None:
+            return False
+        self._loop = asyncio.get_running_loop()
+        try:
+            self._subscription = watch(self._on_source_event)
+        except Exception as exc:
+            logger.warning("agent %s: could not start watcher (%s); serving without hot-reload", self.spec.name, exc)
+            return False
+        logger.info("agent %s: watching channel %r for updates", self.spec.name, self.spec.channel)
+        return True
+
+    def stop_watch(self) -> None:
+        subscription, self._subscription = self._subscription, None
+        if subscription is not None:
+            try:
+                subscription.stop()
+            except Exception:
+                logger.exception("agent %s: watcher stop failed", self.spec.name)
+
+    def _on_source_event(self, _record: Any = None) -> None:
+        """Watcher-thread callback: schedule a reload on the agent's event loop.
+
+        The delivered record is ignored on purpose — reload() re-fetches via
+        the source so cold load and hot-reload share one (preflighted,
+        swap-safe) path.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        asyncio.run_coroutine_threadsafe(self.reload(), loop)
 
     def _parse_and_preflight(self, snapshot: ChainSnapshot) -> tuple[Any, list[str], list[str]]:
         from mmar_carl import ReasoningChain

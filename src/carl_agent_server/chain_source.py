@@ -80,6 +80,16 @@ class MemoryChainSource:
             self._client = MemoryClient(**kwargs)
         return self._client
 
+    def watch(self, callback: Any) -> Any:
+        """Subscribe to entity events on the followed channel (SSE, background thread).
+
+        Returns the started ``gigaevo_client`` Subscription (``.stop()`` to end).
+        The callback receives a fresh ``ChainRecord`` per event; the agent
+        ignores the payload and re-loads through :meth:`load` so reload and
+        hot-reload share one code path.
+        """
+        return self._get_client().watch_chain_record(self.entity_id, callback, channel=self.channel)
+
     def load(self) -> ChainSnapshot:
         record = self._get_client().get_chain_record(self.entity_id, channel=self.channel)
         record_meta: dict[str, Any] = dict(getattr(record, "meta", None) or {})
