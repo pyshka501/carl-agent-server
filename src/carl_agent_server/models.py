@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -65,6 +65,11 @@ class DeploymentSpec(BaseModel):
         default=True,
         description="Loopback (127.0.0.1/::1) requests skip the API-key check — for local dev/demo.",
     )
+    snapshot_dir: str | None = Field(
+        default=None,
+        description="Directory to persist a paused run's ContextSnapshot (durable "
+        "human-input pause/resume). None = in-memory only.",
+    )
 
     memory_url: str | None = Field(default=None, description="Memory API base URL; falls back to AGENT_MEMORY_URL")
     memory_api_key: str | None = Field(default=None, description="Memory API key; falls back to AGENT_MEMORY_API_KEY")
@@ -99,7 +104,7 @@ class StepSummary(BaseModel):
     error: str | None = None
 
 
-RunStatus = Literal["running", "succeeded", "failed", "timeout", "cancelled"]
+RunStatus = Literal["running", "waiting", "succeeded", "failed", "timeout", "cancelled"]
 
 
 class RunRecord(BaseModel):
@@ -116,10 +121,19 @@ class RunRecord(BaseModel):
     token_usage: dict[str, int] = Field(default_factory=dict)
     execution_time_s: float | None = None
     steps: list[StepSummary] = Field(default_factory=list)
+    awaiting_input: dict[str, Any] | None = Field(
+        default=None,
+        description="When status is 'waiting': the pending human-input prompt. "
+        "POST /runs/{id}/input to resume.",
+    )
 
 
 class InvokeRequest(BaseModel):
     input: str = Field(..., min_length=1, description="The task / question for the agent")
+
+
+class HumanInputRequest(BaseModel):
+    value: str = Field(..., description="The human's answer to resume a waiting run")
 
 
 class ChatRequest(BaseModel):

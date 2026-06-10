@@ -67,6 +67,7 @@ uv run carl-agent serve --chain-file ./chain.json --name demo --port 8001
 | `POST /invoke` | run the chain (`?mode=sync` default; `?mode=async` → 202 + run_id) |
 | `POST /chat` | converse with the agent (`{message, session_id?}`); the dialogue so far is fed into the chain each turn — the chain is unchanged. Omit `session_id` to start a session (returned in the reply); sessions evict after the idle TTL |
 | `GET /runs/{id}` | run status/result (answer, steps, tokens, time) |
+| `POST /runs/{id}/input` | resume a run paused on a `human_input` step (status `waiting`) — `{value}`. Async-invoke flow: invoke `?mode=async`, poll until `waiting`, then provide input |
 | `GET /runs/{id}/events` | SSE step stream (replays history, ends with `result`) |
 | `DELETE /runs/{id}` | cooperative cancel of a running run |
 | `GET /info` | agent card (name, version, channel, required tools, readiness) |

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .chain_source import ChainSnapshot, ChainSource, FileChainSource, MemoryChainSource
@@ -43,6 +45,9 @@ class RunHandle:
         self.context: Any | None = None
         self.task: asyncio.Task[None] | None = None
         self.cancel_requested = False
+        self.awaiting_input = False
+        self.input_future: Any | None = None
+        self.snapshot: Any | None = None
         self.events: list[dict[str, Any]] = []
         self.finished = False
         self._cond = asyncio.Condition()
@@ -303,6 +308,7 @@ class AgentState:
             return record
         context = self._build_context(self._render_input(user_input))
         handle.context = context
+        context.on_human_input_requested = self._make_human_input_handler(handle)
         handle.task = asyncio.create_task(self._execute(handle, chain, context))
         if wait:
             await asyncio.shield(handle.task)
@@ -325,6 +331,72 @@ class AgentState:
         else:
             turn_count = len(session.turns)
         return session.session_id, record, turn_count
+
+    # ------------------------------------------------------ human input (D)
+    def _make_human_input_handler(self, handle: RunHandle) -> Callable[[str, Any], None]:
+        """Build the ``on_human_input_requested`` callback for one run.
+
+        When the chain hits a ``human_input`` step CARL invokes this with the
+        prompt + a future, then awaits the future. We pause the run: status →
+        ``waiting``, expose the prompt on the record, snapshot the context (for
+        durable cross-process resume), and emit an ``awaiting_input`` SSE event.
+        ``POST /runs/{id}/input`` later resolves the future via
+        ``provide_input``. Pause/resume is an async-invoke flow — a sync invoke
+        would just block until the chain deadline.
+        """
+
+        def handler(prompt: str, future: Any) -> None:
+            # The executor runs steps on a COPY of the context, so its
+            # provide_human_input() future isn't reachable on handle.context.
+            # The callback hands us the future directly — resolve THAT to resume.
+            handle.input_future = future
+            handle.awaiting_input = True
+            handle.record.status = "waiting"
+            handle.record.awaiting_input = {"prompt": prompt}
+            try:
+                if handle.context is not None:
+                    handle.snapshot = handle.context.snapshot()
+                    self._persist_snapshot(handle)
+            except Exception:  # noqa: BLE001 — durability is best-effort
+                logger.warning(
+                    "agent %s: snapshot on pause failed", self.spec.name, exc_info=True
+                )
+            asyncio.ensure_future(
+                handle.emit("awaiting_input", {"run_id": handle.record.run_id, "prompt": prompt})
+            )
+
+        return handler
+
+    def _persist_snapshot(self, handle: RunHandle) -> None:
+        """Best-effort: write the paused run's ContextSnapshot to disk when a
+        ``snapshot_dir`` is configured (durable resume primitive)."""
+        if not self.spec.snapshot_dir or handle.snapshot is None:
+            return
+        directory = Path(self.spec.snapshot_dir).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{handle.record.run_id}.json"
+        payload = json.dumps(handle.snapshot.model_dump(mode="json"), ensure_ascii=False)
+        path.write_text(payload, encoding="utf-8")
+
+    async def provide_input(self, run_id: str, value: str) -> RunRecord:
+        """Resume a waiting run by answering its human-input step.
+
+        Raises KeyError (→404) for an unknown run, ValueError (→409) when the
+        run is not actually waiting / nothing is pending.
+        """
+        handle = self.handles.get(run_id)
+        if handle is None:
+            raise KeyError(run_id)
+        future = handle.input_future
+        if handle.record.status != "waiting" or future is None or future.done():
+            raise ValueError(f"run is {handle.record.status}, not waiting for input")
+        future.set_result(value)
+        handle.input_future = None
+        handle.awaiting_input = False
+        handle.record.awaiting_input = None
+        handle.record.status = "running"
+        await handle.emit("input_provided", {"run_id": run_id})
+        return handle.record
 
     async def _execute(self, handle: RunHandle, chain: Any, context: Any) -> None:
         """Drive one run via ``stream_async``: step events feed SSE, the terminal
@@ -368,6 +440,8 @@ class AgentState:
         finally:
             if handle.cancel_requested and record.status not in ("succeeded",):
                 record.status = "cancelled" if record.status != "timeout" else "timeout"
+            handle.awaiting_input = False
+            record.awaiting_input = None  # cleared at any terminal state
             record.finished_at = datetime.now(UTC)
             await handle.emit("result", record.model_dump(mode="json"))
             # after the result event: SSE consumers never wait on Memory I/O

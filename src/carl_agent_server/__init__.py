@@ -14,6 +14,7 @@ from .models import (
     ChatResponse,
     DeploymentInfo,
     DeploymentSpec,
+    HumanInputRequest,
     InvokeRequest,
     RunRecord,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "ChatResponse",
     "DeploymentInfo",
     "DeploymentSpec",
+    "HumanInputRequest",
     "InvokeRequest",
     "RunRecord",
     "__version__",

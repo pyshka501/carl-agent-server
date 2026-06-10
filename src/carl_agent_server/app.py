@@ -24,6 +24,7 @@ from .models import (
     ChatRequest,
     ChatResponse,
     DeploymentSpec,
+    HumanInputRequest,
     InvokeRequest,
     RunRecord,
 )
@@ -134,6 +135,20 @@ def build_agent_app(
         if record is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
         return record
+
+    @app.post("/runs/{run_id}/input", response_model=RunRecord, tags=["agent"], dependencies=[require_key])
+    async def provide_input(run_id: str, request: HumanInputRequest) -> RunRecord:
+        """Resume a run paused on a ``human_input`` step (status ``waiting``).
+
+        The chain continues in the background; poll /runs/{id} or stream
+        /runs/{id}/events for completion. Pause/resume is an async-invoke flow.
+        """
+        try:
+            return await state.provide_input(run_id, request.value)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"run {run_id} not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/runs/{run_id}/events", tags=["agent"], dependencies=[require_key])
     async def run_events(run_id: str) -> StreamingResponse:
