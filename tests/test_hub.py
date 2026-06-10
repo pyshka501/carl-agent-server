@@ -107,3 +107,48 @@ def test_unknown_deployment_404(tmp_path):
     with _hub(tmp_path) as client:
         assert client.get("/deployments/ghost").status_code == 404
         assert client.post("/deployments/ghost/reload").status_code == 404
+
+
+def test_attached_agent_hot_reloads_inside_hub():
+    """B5 e2e: deploy(attached) → promote on the channel → the MOUNTED agent
+    hot-reloads (its /docs + the hub listing show the new version) and keeps
+    answering. The full release path under the hub, no network."""
+    import time
+
+    from carl_agent_server.chain_source import MemoryChainSource
+
+    from .test_attached import FakeMemoryClient, _record
+
+    fake = FakeMemoryClient(_record(1, SAMPLE_CHAIN))
+
+    def factory(spec: DeploymentSpec):
+        source = MemoryChainSource("chain-1", channel="stable", client=fake)
+        return build_agent_app(spec, chain_source=source, llm_client=MockLLM())
+
+    app = build_hub_app(state_file=None, agent_app_factory=factory)
+    with TestClient(app) as client:
+        created = client.post(
+            "/deployments", json={"name": "weather", "entity_id": "chain-1"}
+        )
+        assert created.status_code == 201
+        assert created.json()["version"].startswith("v1")
+        assert fake.callback is not None  # the mounted agent armed its watcher
+
+        fake.promote(_record(2, dict(SAMPLE_CHAIN), display_name="Weather 2.0"))
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            info = client.get("/agents/weather/info").json()
+            if info["version"].startswith("v2"):
+                break
+            time.sleep(0.05)
+        else:  # pragma: no cover
+            raise AssertionError(f"agent never reloaded: {info}")
+        # the mounted agent's own Swagger follows the release
+        assert client.get("/agents/weather/openapi.json").json()["info"]["title"] == "Weather 2.0"
+        # the hub listing reflects the live version too
+        listing = client.get("/deployments").json()
+        assert listing[0]["version"].startswith("v2")
+        # and the rolled-out agent still answers
+        assert client.post("/agents/weather/invoke", json={"input": "hi"}).json()["status"] == "succeeded"
+    assert fake.subscription.stopped is True  # hub shutdown stopped the watcher
