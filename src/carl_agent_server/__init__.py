@@ -17,6 +17,7 @@ from .models import (
     HumanInputRequest,
     InvokeRequest,
     RunRecord,
+    ScheduleConfig,
 )
 
 __version__ = "0.1.0"
@@ -30,6 +31,7 @@ __all__ = [
     "HumanInputRequest",
     "InvokeRequest",
     "RunRecord",
+    "ScheduleConfig",
     "__version__",
     "build_agent_app",
     "build_hub_app",

@@ -14,7 +14,7 @@ from typing import Any
 
 from .chain_source import ChainSnapshot, ChainSource, FileChainSource, MemoryChainSource
 from .llm import LLMNotConfiguredError, build_llm_client
-from .models import AgentMeta, DeploymentSpec, RunRecord, StepSummary
+from .models import AgentMeta, DeploymentSpec, RunRecord, ScheduleStatus, StepSummary
 from .run_records import RunRecorder
 from .sessions import SessionStore, compose_chat_input
 from .timeouts import inject_default_timeouts
@@ -116,6 +116,11 @@ class AgentState:
         self.on_reloaded: list[Callable[[], None]] = []
         self._swap_lock = asyncio.Lock()
         self._reload_lock = asyncio.Lock()
+        # D3 — auto-invoke scheduler
+        self._scheduler_task: asyncio.Task[None] | None = None
+        self._schedule_fire_count = 0
+        self._schedule_last_fired: datetime | None = None
+        self._schedule_last_run_id: str | None = None
         self._loaded_once = False
         self._subscription: Any | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -211,6 +216,62 @@ class AgentState:
                 subscription.stop()
             except Exception:
                 logger.exception("agent %s: watcher stop failed", self.spec.name)
+
+    # ------------------------------------------------------- scheduler (D3)
+    def start_schedule(self) -> bool:
+        """Arm the auto-invoke timer if the spec carries an enabled schedule."""
+        schedule = self.spec.schedule
+        if schedule is None or not schedule.enabled or self._scheduler_task is not None:
+            return False
+        self._scheduler_task = asyncio.create_task(self._scheduler_loop(schedule.interval_s))
+        logger.info(
+            "agent %s: scheduled auto-invoke every %.0fs", self.spec.name, schedule.interval_s
+        )
+        return True
+
+    def stop_schedule(self) -> None:
+        task, self._scheduler_task = self._scheduler_task, None
+        if task is not None:
+            task.cancel()
+
+    async def _scheduler_loop(self, interval_s: float) -> None:
+        """Sleep, fire, repeat. One run's failure never kills the loop."""
+        try:
+            while True:
+                await asyncio.sleep(interval_s)
+                try:
+                    await self.fire_scheduled()
+                except Exception:  # noqa: BLE001 — keep the schedule alive
+                    logger.exception("agent %s: scheduled run failed", self.spec.name)
+        except asyncio.CancelledError:
+            pass
+
+    async def fire_scheduled(self) -> RunRecord | None:
+        """Run the scheduled input once. Skips (returns None) when not ready."""
+        schedule = self.spec.schedule
+        if schedule is None:
+            return None
+        ok, reason = self.ready
+        if not ok:
+            logger.warning("agent %s: skipping scheduled run — not ready (%s)", self.spec.name, reason)
+            return None
+        record = await self.start_run(schedule.input, wait=False)
+        self._schedule_fire_count += 1
+        self._schedule_last_fired = datetime.now(UTC)
+        self._schedule_last_run_id = record.run_id
+        return record
+
+    def schedule_status(self) -> ScheduleStatus:
+        schedule = self.spec.schedule
+        return ScheduleStatus(
+            configured=schedule is not None,
+            enabled=bool(schedule and schedule.enabled),
+            interval_s=schedule.interval_s if schedule else None,
+            input=schedule.input if schedule else None,
+            fire_count=self._schedule_fire_count,
+            last_fired_at=self._schedule_last_fired,
+            last_run_id=self._schedule_last_run_id,
+        )
 
     def _on_source_event(self, _record: Any = None) -> None:
         """Watcher-thread callback: schedule a reload on the agent's event loop.

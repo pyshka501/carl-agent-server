@@ -70,6 +70,8 @@ uv run carl-agent serve --chain-file ./chain.json --name demo --port 8001
 | `POST /runs/{id}/input` | resume a run paused on a `human_input` step (status `waiting`) — `{value}`. Async-invoke flow: invoke `?mode=async`, poll until `waiting`, then provide input |
 | `GET /runs/{id}/events` | SSE step stream (replays history, ends with `result`) |
 | `DELETE /runs/{id}` | cooperative cancel of a running run |
+| `GET /schedule` | the deployment's auto-invoke schedule + firing stats (D3) |
+| `POST /schedule/trigger` | fire one scheduled run now (manual trigger) |
 | `GET /info` | agent card (name, version, channel, required tools, readiness) |
 | `GET /healthz` / `GET /readyz` | liveness / readiness (with the reason when 503) |
 | `GET /docs` | this agent's own Swagger |
@@ -104,6 +106,15 @@ default per-step timeout injected at load into any step the author left
 unbounded — capped never to exceed the chain-level `timeout`, so it tightens
 but never loosens authored intent. Together a single hung step fails fast at
 the step level instead of burning the whole run budget.
+
+## Schedules
+
+A deployment can carry a `schedule` (`{interval_s, input, enabled}`) and the
+agent auto-invokes its chain on that cadence — the in-template scheduler,
+lifecycle-bound (starts on activation, stops on shutdown; survives a single
+run's failure, skips ticks while not ready). `GET /schedule` reports it,
+`POST /schedule/trigger` fires one run now. For external cron/batch use
+`care run` instead; an inbound HTTP trigger is just `POST /invoke`.
 
 ## Tools
 

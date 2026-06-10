@@ -12,6 +12,18 @@ from pydantic import BaseModel, Field, model_validator
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 
 
+class ScheduleConfig(BaseModel):
+    """Auto-invoke the agent's chain on a fixed cadence (D3).
+
+    A simple interval timer — external cron/batch is served by ``care run``;
+    this is the in-template scheduler so a deployment can self-trigger.
+    """
+
+    interval_s: float = Field(..., gt=0, description="Seconds between automatic runs")
+    input: str = Field(..., min_length=1, description="The task fed to the chain each tick")
+    enabled: bool = Field(default=True, description="Set false to keep the schedule but pause firing")
+
+
 class DeploymentSpec(BaseModel):
     """One agent = one chain + how to run it.
 
@@ -69,6 +81,10 @@ class DeploymentSpec(BaseModel):
         default=None,
         description="Directory to persist a paused run's ContextSnapshot (durable "
         "human-input pause/resume). None = in-memory only.",
+    )
+    schedule: ScheduleConfig | None = Field(
+        default=None,
+        description="Auto-invoke the chain on a fixed interval (D3). None = no schedule.",
     )
 
     memory_url: str | None = Field(default=None, description="Memory API base URL; falls back to AGENT_MEMORY_URL")
@@ -134,6 +150,18 @@ class InvokeRequest(BaseModel):
 
 class HumanInputRequest(BaseModel):
     value: str = Field(..., description="The human's answer to resume a waiting run")
+
+
+class ScheduleStatus(BaseModel):
+    """The deployment's auto-invoke schedule and its firing stats (D3)."""
+
+    configured: bool = False
+    enabled: bool = False
+    interval_s: float | None = None
+    input: str | None = None
+    fire_count: int = 0
+    last_fired_at: datetime | None = None
+    last_run_id: str | None = None
 
 
 class ChatRequest(BaseModel):

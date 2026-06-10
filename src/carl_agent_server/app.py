@@ -27,6 +27,7 @@ from .models import (
     HumanInputRequest,
     InvokeRequest,
     RunRecord,
+    ScheduleStatus,
 )
 
 
@@ -94,6 +95,23 @@ def build_agent_app(
             ready=ok,
             ready_reason=reason,
         )
+
+    @app.get("/schedule", response_model=ScheduleStatus, tags=["service"])
+    async def get_schedule() -> ScheduleStatus:
+        """The deployment's auto-invoke schedule and its firing stats (D3)."""
+        return state.schedule_status()
+
+    @app.post("/schedule/trigger", response_model=RunRecord, tags=["agent"], dependencies=[require_key])
+    async def trigger_schedule() -> Any:
+        """Fire one scheduled run immediately (manual trigger). 404 when no
+        schedule is configured, 503 when the agent is not ready."""
+        if state.spec.schedule is None:
+            raise HTTPException(status_code=404, detail="no schedule configured")
+        record = await state.fire_scheduled()
+        if record is None:
+            _, reason = state.ready
+            raise HTTPException(status_code=503, detail=f"agent is not ready: {reason}")
+        return JSONResponse(record.model_dump(mode="json"), status_code=202)
 
     @app.post("/invoke", response_model=RunRecord, tags=["agent"], dependencies=[require_key])
     async def invoke(request: InvokeRequest, mode: Literal["sync", "async"] = "sync") -> Any:
@@ -228,13 +246,15 @@ async def activate_agent_app(app: FastAPI) -> AgentState:
     await state.ensure_loaded()
     refresh_app_meta(app, state)
     state.start_watch()
+    state.start_schedule()
     return state
 
 
 def deactivate_agent_app(app: FastAPI) -> None:
-    """Stop the agent's background work (the watcher). Safe to call twice."""
+    """Stop the agent's background work (watcher + scheduler). Safe to call twice."""
     app.state.activated = False
     app.state.agent.stop_watch()
+    app.state.agent.stop_schedule()
 
 
 def refresh_app_meta(app: FastAPI, state: AgentState) -> None:
