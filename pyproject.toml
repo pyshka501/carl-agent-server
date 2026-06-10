@@ -31,6 +31,7 @@ Repository = "https://github.com/pyshka501/carl-agent-server"
 
 [project.scripts]
 carl-agent = "carl_agent_server.cli:main"
+carl-agent-hub = "carl_agent_server.cli:hub_main"
 
 [dependency-groups]
 dev = [
