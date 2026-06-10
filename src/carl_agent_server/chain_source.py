@@ -68,7 +68,8 @@ class MemoryChainSource:
         self._api_key = api_key
         self._client = client
 
-    def _get_client(self) -> Any:
+    def get_client(self) -> Any:
+        """The (lazily constructed) Memory client — shared by load/watch/run-records."""
         if self._client is None:
             from gigaevo_client import MemoryClient
 
@@ -88,10 +89,10 @@ class MemoryChainSource:
         ignores the payload and re-loads through :meth:`load` so reload and
         hot-reload share one code path.
         """
-        return self._get_client().watch_chain_record(self.entity_id, callback, channel=self.channel)
+        return self.get_client().watch_chain_record(self.entity_id, callback, channel=self.channel)
 
     def load(self) -> ChainSnapshot:
-        record = self._get_client().get_chain_record(self.entity_id, channel=self.channel)
+        record = self.get_client().get_chain_record(self.entity_id, channel=self.channel)
         record_meta: dict[str, Any] = dict(getattr(record, "meta", None) or {})
         content: dict[str, Any] = dict(getattr(record, "content", None) or {})
         version_number = getattr(record, "version_number", None)

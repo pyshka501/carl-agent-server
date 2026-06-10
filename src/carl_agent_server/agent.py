@@ -13,6 +13,7 @@ from typing import Any
 from .chain_source import ChainSnapshot, ChainSource, FileChainSource, MemoryChainSource
 from .llm import LLMNotConfiguredError, build_llm_client
 from .models import AgentMeta, DeploymentSpec, RunRecord, StepSummary
+from .run_records import RunRecorder
 from .tools import register_builtin_tools
 
 logger = logging.getLogger(__name__)
@@ -87,10 +88,13 @@ class AgentState:
         *,
         chain_source: ChainSource | None = None,
         llm_client: Any | None = None,
+        run_recorder: RunRecorder | None = None,
     ) -> None:
         self.spec = spec
         self._source: ChainSource = chain_source or self._default_source(spec)
         self._llm = llm_client
+        self._recorder = run_recorder
+        self._recorder_resolved = run_recorder is not None
         self.chain: Any | None = None
         self.meta: AgentMeta = AgentMeta(display_name=spec.name)
         self.required_tools: list[str] = []
@@ -255,6 +259,22 @@ class AgentState:
             return template.replace("{input}", user_input)
         return user_input
 
+    def _get_recorder(self) -> RunRecorder | None:
+        """Run-records go to Memory only in attached mode (there is an entity to
+        link to and a client to write with). Built lazily from the source's client."""
+        if not self._recorder_resolved:
+            self._recorder_resolved = True
+            if self.spec.entity_id and isinstance(self._source, MemoryChainSource):
+                try:
+                    self._recorder = RunRecorder(
+                        self._source.get_client(),
+                        entity_id=self.spec.entity_id,
+                        agent_name=self.spec.name,
+                    )
+                except Exception as exc:
+                    logger.warning("agent %s: run-recorder unavailable (%s)", self.spec.name, exc)
+        return self._recorder
+
     # ----------------------------------------------------------------- runs
     async def start_run(self, user_input: str, *, wait: bool) -> RunRecord:
         """Start one chain run. ``wait=True`` (sync invoke) awaits completion;
@@ -322,6 +342,10 @@ class AgentState:
                 record.status = "cancelled" if record.status != "timeout" else "timeout"
             record.finished_at = datetime.now(UTC)
             await handle.emit("result", record.model_dump(mode="json"))
+            # after the result event: SSE consumers never wait on Memory I/O
+            recorder = self._get_recorder()
+            if recorder is not None:
+                await recorder.record(record)
 
     def _remember(self, record: RunRecord, handle: RunHandle) -> None:
         self.runs[record.run_id] = record

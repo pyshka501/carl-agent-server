@@ -35,13 +35,17 @@ class FakeSubscription:
 
 
 class FakeMemoryClient:
-    """Just enough of gigaevo_client.MemoryClient for the agent: record reads + watch."""
+    """Just enough of gigaevo_client.MemoryClient for the agent:
+    record reads, watch, and the run-record writes (A6)."""
 
     def __init__(self, record: SimpleNamespace) -> None:
         self.record = record
         self.callback: Any = None
         self.subscription = FakeSubscription()
         self.fetches = 0
+        self.cards: list[dict[str, Any]] = []
+        self.runs_recorded: list[tuple[str, str | None]] = []
+        self.fail_saves = False
 
     def get_chain_record(self, entity_id: str, *, channel: str = "latest") -> SimpleNamespace:
         assert entity_id == "chain-1"
@@ -58,6 +62,18 @@ class FakeMemoryClient:
         self.record = new_record
         assert self.callback is not None, "watcher was not started"
         self.callback(new_record)
+
+    def save_memory_card(self, memory_card: dict[str, Any], name: str, tags: list[str] | None = None, **_: Any) -> Any:
+        if self.fail_saves:
+            raise RuntimeError("memory is down")
+        self.cards.append({"content": memory_card, "name": name, "tags": tags or []})
+        return SimpleNamespace(entity_id="card-1", version_id="cv-1", channel="latest")
+
+    def record_chain_run(self, entity_id: str, run_id: str | None = None) -> Any:
+        if self.fail_saves:
+            raise RuntimeError("memory is down")
+        self.runs_recorded.append((entity_id, run_id))
+        return SimpleNamespace(entity_id=entity_id)
 
 
 def _attached_client(fake: FakeMemoryClient, llm: MockLLM) -> TestClient:

@@ -26,14 +26,16 @@ def build_agent_app(
     *,
     chain_source: Any | None = None,
     llm_client: Any | None = None,
+    run_recorder: Any | None = None,
 ) -> FastAPI:
     """Build the FastAPI app serving one deployed chain.
 
-    ``chain_source`` / ``llm_client`` are injection points for the hub, solo
-    CLI and tests; by default the source comes from the spec (file or Memory)
-    and the LLM client from spec/env at first use.
+    ``chain_source`` / ``llm_client`` / ``run_recorder`` are injection points
+    for the hub, solo CLI and tests; by default the source comes from the spec
+    (file or Memory), the LLM client from spec/env at first use, and the
+    run-recorder from the Memory source's client (attached mode only).
     """
-    state = AgentState(spec, chain_source=chain_source, llm_client=llm_client)
+    state = AgentState(spec, chain_source=chain_source, llm_client=llm_client, run_recorder=run_recorder)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
