@@ -37,15 +37,11 @@ def build_agent_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # the hook keeps /docs metadata in sync across hot-reloads (A3)
-        state.on_reloaded.append(lambda: refresh_app_meta(app, state))
-        await state.ensure_loaded()
-        refresh_app_meta(app, state)
-        state.start_watch()
+        await activate_agent_app(app)
         try:
             yield
         finally:
-            state.stop_watch()
+            deactivate_agent_app(app)
 
     app = FastAPI(
         title=spec.name,
@@ -136,6 +132,33 @@ def build_agent_app(
         return {"run_id": run_id, "status": "cancelling"}
 
     return app
+
+
+async def activate_agent_app(app: FastAPI) -> AgentState:
+    """Run the agent app's startup work: load + preflight, /docs metadata,
+    hot-reload watcher.
+
+    The solo path runs this from the app's own lifespan; the HUB calls it
+    explicitly for mounted sub-applications, whose lifespans Starlette does
+    not run. Idempotent — re-activation only re-ensures the load.
+    """
+    state: AgentState = app.state.agent
+    if getattr(app.state, "activated", False):
+        await state.ensure_loaded()
+        return state
+    app.state.activated = True
+    # the hook keeps /docs metadata in sync across hot-reloads (A3)
+    state.on_reloaded.append(lambda: refresh_app_meta(app, state))
+    await state.ensure_loaded()
+    refresh_app_meta(app, state)
+    state.start_watch()
+    return state
+
+
+def deactivate_agent_app(app: FastAPI) -> None:
+    """Stop the agent's background work (the watcher). Safe to call twice."""
+    app.state.activated = False
+    app.state.agent.stop_watch()
 
 
 def refresh_app_meta(app: FastAPI, state: AgentState) -> None:

@@ -93,6 +93,23 @@ class InvokeRequest(BaseModel):
     input: str = Field(..., min_length=1, description="The task / question for the agent")
 
 
+class DeploymentInfo(BaseModel):
+    """One hub deployment as reported by the control API."""
+
+    name: str
+    url: str = Field(..., description="Mount path of the agent (its /docs lives under it)")
+    display_name: str
+    version: str
+    ready: bool
+    ready_reason: str
+    entity_id: str | None = None
+    channel: str | None = None
+    chain_file: str | None = None
+    source: str
+    deployed_at: datetime
+    runs: int = 0
+
+
 class AgentInfo(BaseModel):
     """The agent card served at /info."""
 

@@ -7,15 +7,18 @@ Swagger page reads as that agent's documentation). Agents are served solo
 """
 
 from .app import build_agent_app
-from .models import AgentInfo, DeploymentSpec, InvokeRequest, RunRecord
+from .hub import build_hub_app
+from .models import AgentInfo, DeploymentInfo, DeploymentSpec, InvokeRequest, RunRecord
 
 __version__ = "0.1.0"
 
 __all__ = [
     "AgentInfo",
+    "DeploymentInfo",
     "DeploymentSpec",
     "InvokeRequest",
     "RunRecord",
     "__version__",
     "build_agent_app",
+    "build_hub_app",
 ]
