@@ -12,7 +12,8 @@ versioned in **gigaevo Memory** (channels: `latest` → `stable`), executed by
 follows a Memory channel and **hot-reloads on `promote`/`pin`** — promote a
 new version and the running agent picks it up with zero downtime; pin the old
 version to roll back. A hot-reloaded version that fails preflight is rejected
-and the healthy one keeps serving.
+and the healthy one keeps serving. Updates arrive via SSE push with a polling
+safety net (see [Hot-reload](#hot-reload-attached-mode)).
 
 ## Quickstart — the hub (recommended)
 
@@ -98,6 +99,34 @@ open. Loopback requests (127.0.0.1/::1) skip the check unless
 `auth_allow_localhost=false`. No `api_key` set → auth is off (localhost demo).
 Solo: `carl-agent serve --api-key <key>` (or `AGENT_API_KEY`). The hub's
 state file holds these keys and is written `chmod 600`.
+
+## Hot-reload (attached mode)
+
+An attached agent follows its Memory channel through **two mechanisms**:
+
+- **SSE watcher** (fast path): a `gigaevo_client` subscription to
+  `/v1/events/stream` filtered on the entity — a `promoted`/`pinned` event
+  triggers a reload within ~a second.
+- **Poll fallback** (safety net): every `poll_fallback_s` (default **60s**,
+  `0` disables) the agent compares the channel's current `version_id` to the
+  serving one and reloads on drift.
+
+The fallback exists because the SSE subscription can die **silently**:
+`gigaevo_client` (≤0.3.0) retries a failing `/v1/events/stream` in a loop
+without ever surfacing the error — e.g. when a stale Memory deployment routes
+that path into the generic `/v1/{entity_type}/{entity_id}` handler (400), the
+watcher looks armed but no event is ever delivered. With the fallback, a
+missed promote is picked up within a minute instead of never; `POST
+/deployments/{name}/reload` remains the immediate manual lever.
+
+To check the live events endpoint a deployment is watching:
+`curl -N <memory-url>/v1/events/stream` must hold the connection open and
+print `entity_changed` events on promote — an instant JSON error means the
+Memory deployment is broken/stale and only the poll fallback (and manual
+reload) will move versions.
+
+Both paths funnel into one swap-safe reload: fetch → parse → preflight → swap,
+and a failed candidate never evicts the serving chain.
 
 ## Timeouts
 

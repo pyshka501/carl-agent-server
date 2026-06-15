@@ -76,8 +76,9 @@ class FakeMemoryClient:
         return SimpleNamespace(entity_id=entity_id)
 
 
-def _attached_client(fake: FakeMemoryClient, llm: MockLLM) -> TestClient:
-    spec = DeploymentSpec(name="weather", entity_id="chain-1", channel="stable")
+def _attached_client(fake: FakeMemoryClient, llm: MockLLM, *, poll_fallback_s: float | None = None) -> TestClient:
+    extra = {} if poll_fallback_s is None else {"poll_fallback_s": poll_fallback_s}
+    spec = DeploymentSpec(name="weather", entity_id="chain-1", channel="stable", **extra)
     source = MemoryChainSource("chain-1", channel="stable", client=fake)
     return TestClient(build_agent_app(spec, chain_source=source, llm_client=llm))
 
@@ -157,3 +158,56 @@ def test_file_source_has_no_watcher(chain_file, mock_llm):
     with TestClient(app) as client:
         client.get("/healthz")
         assert app.state.agent._subscription is None  # nothing to watch offline
+        assert app.state.agent._poll_task is None  # and nothing to poll
+
+
+class DeadSSEMemoryClient(FakeMemoryClient):
+    """Memory whose events endpoint is broken: the SSE watcher cannot start."""
+
+    def watch_chain_record(self, *args: Any, **kwargs: Any) -> FakeSubscription:
+        raise RuntimeError("events endpoint unreachable")
+
+
+def test_poll_fallback_catches_missed_promote():
+    """The 2026-06-11 live bug: SSE subscribed without error, but promote events
+    never arrived (the deployed Memory misrouted /v1/events/stream). The poll
+    fallback must pick the promote up anyway."""
+    fake = FakeMemoryClient(_record(1, SAMPLE_CHAIN))
+    with _attached_client(fake, MockLLM(), poll_fallback_s=0.05) as client:
+        assert client.get("/info").json()["version"].startswith("v1")
+        # promote happens in Memory, but no event reaches the watcher
+        fake.record = _record(2, dict(SAMPLE_CHAIN, name="Echo Researcher v2"))
+        _wait_for_version(client, "v2")
+
+
+def test_poll_fallback_reloads_when_sse_cannot_start():
+    fake = DeadSSEMemoryClient(_record(1, SAMPLE_CHAIN))
+    with _attached_client(fake, MockLLM(), poll_fallback_s=0.05) as client:
+        assert client.get("/info").json()["version"].startswith("v1")
+        fake.record = _record(2, SAMPLE_CHAIN)
+        _wait_for_version(client, "v2")
+
+
+def test_poll_fallback_disabled_serves_stale(mock_llm):
+    spec = DeploymentSpec(name="weather", entity_id="chain-1", channel="stable", poll_fallback_s=0)
+    fake = DeadSSEMemoryClient(_record(1, SAMPLE_CHAIN))
+    source = MemoryChainSource("chain-1", channel="stable", client=fake)
+    app = build_agent_app(spec, chain_source=source, llm_client=mock_llm)
+    with TestClient(app) as client:
+        client.get("/healthz")
+        assert app.state.agent._subscription is None  # SSE failed to start
+        assert app.state.agent._poll_task is None  # polling explicitly off
+        fake.record = _record(2, SAMPLE_CHAIN)
+        time.sleep(0.3)
+        assert client.get("/info").json()["version"].startswith("v1")  # stale by design
+
+
+def test_poll_task_stopped_on_shutdown():
+    fake = FakeMemoryClient(_record(1, SAMPLE_CHAIN))
+    spec = DeploymentSpec(name="weather", entity_id="chain-1", channel="stable", poll_fallback_s=30)
+    source = MemoryChainSource("chain-1", channel="stable", client=fake)
+    app = build_agent_app(spec, chain_source=source, llm_client=MockLLM())
+    with TestClient(app) as client:
+        client.get("/healthz")
+        assert app.state.agent._poll_task is not None  # armed alongside SSE
+    assert app.state.agent._poll_task is None  # lifespan shutdown cancelled it
