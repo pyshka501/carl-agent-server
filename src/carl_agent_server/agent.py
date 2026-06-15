@@ -88,6 +88,21 @@ class RunHandle:
         if self.context is not None:
             self.context.cancel()
 
+    def cancel_pending_input(self) -> None:
+        """Unblock a run paused on a ``human_input`` step so a cancel can land.
+
+        The paused step is awaiting the future; failing it (a plain Exception,
+        NOT CancelledError — the executor only converts Exceptions) makes the
+        chain unwind instead of waiting forever, and ``request_cancel()``'s
+        mark turns the terminal status into ``cancelled``. No-op when nothing
+        is pending.
+        """
+        future, self.input_future = self.input_future, None
+        self.awaiting_input = False
+        self.record.awaiting_input = None
+        if future is not None and not future.done():
+            future.set_exception(RuntimeError("run cancelled while waiting for human input"))
+
 
 class AgentState:
     """Holds the loaded chain + metadata and executes runs.
@@ -136,6 +151,7 @@ class AgentState:
         self._metrics_cost_usd = 0.0
         self._loaded_once = False
         self._subscription: Any | None = None
+        self._poll_task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------- lifecycle
@@ -203,24 +219,93 @@ class AgentState:
 
     # ------------------------------------------------------------ hot-reload
     def start_watch(self) -> bool:
-        """Subscribe to source events (attached mode) for promote/pin hot-reload.
+        """Arm hot-reload for attached sources: SSE watcher + poll fallback.
 
-        Returns True if a watcher is now active. File sources have nothing to
-        watch; calling twice is a no-op. Must be called from a running loop —
-        watcher events arrive on a background thread and are bridged back via
-        ``run_coroutine_threadsafe``.
+        Returns True if any update mechanism is now active. File sources have
+        nothing to watch; calling twice is a no-op. Must be called from a
+        running loop — watcher events arrive on a background thread and are
+        bridged back via ``run_coroutine_threadsafe``.
+
+        The SSE subscription is the fast path (sub-second reload on promote),
+        but it can die *silently*: gigaevo_client retries a broken or
+        misrouted ``/v1/events/stream`` forever without surfacing the failure.
+        The poll fallback bounds that staleness — every ``spec.poll_fallback_s``
+        the source's ``head()`` is compared to the serving version and a
+        mismatch triggers the same swap-safe reload path.
         """
         watch = getattr(self._source, "watch", None)
-        if watch is None or self._subscription is not None:
+        if watch is None or self._subscription is not None or self._poll_task is not None:
             return False
         self._loop = asyncio.get_running_loop()
+        sse_armed = False
         try:
             self._subscription = watch(self._on_source_event)
+            sse_armed = True
         except Exception as exc:
-            logger.warning("agent %s: could not start watcher (%s); serving without hot-reload", self.spec.name, exc)
+            logger.warning("agent %s: could not start SSE watcher (%s)", self.spec.name, exc)
+        poll_armed = self._start_poll_fallback()
+        if sse_armed:
+            suffix = f" + poll fallback every {self.spec.poll_fallback_s:.0f}s" if poll_armed else ""
+            logger.info(
+                "agent %s: watching channel %r for updates (SSE%s)", self.spec.name, self.spec.channel, suffix
+            )
+        elif poll_armed:
+            logger.warning(
+                "agent %s: hot-reload degraded to polling channel %r every %.0fs",
+                self.spec.name,
+                self.spec.channel,
+                self.spec.poll_fallback_s,
+            )
+        else:
+            logger.warning("agent %s: serving without hot-reload", self.spec.name)
+        return sse_armed or poll_armed
+
+    def _start_poll_fallback(self) -> bool:
+        head = getattr(self._source, "head", None)
+        if head is None or self.spec.poll_fallback_s <= 0:
             return False
-        logger.info("agent %s: watching channel %r for updates", self.spec.name, self.spec.channel)
+        self._poll_task = asyncio.create_task(self._poll_loop(head, self.spec.poll_fallback_s))
         return True
+
+    async def _poll_loop(self, head: Callable[[], str], interval_s: float) -> None:
+        """Reload when the channel head drifts from the serving version.
+
+        Safety net for promotes the SSE watcher missed. A probe failure never
+        kills the loop (Memory may be briefly unreachable); it is logged once
+        per distinct error to avoid spam.
+        """
+        last_error = ""
+        try:
+            while True:
+                await asyncio.sleep(interval_s)
+                try:
+                    current = await asyncio.to_thread(head)
+                except Exception as exc:  # noqa: BLE001 — keep polling through outages
+                    error = f"{type(exc).__name__}: {exc}"
+                    if error != last_error:
+                        logger.warning("agent %s: poll fallback probe failed (%s)", self.spec.name, error)
+                        last_error = error
+                    continue
+                last_error = ""
+                if not current:
+                    continue
+                if self.meta.version_id and current != self.meta.version_id:
+                    logger.info(
+                        "agent %s: poll fallback: channel %r moved to %s (serving %s); reloading",
+                        self.spec.name,
+                        self.spec.channel,
+                        current[:8],
+                        self.meta.version_label,
+                    )
+                elif self.load_error is not None:
+                    logger.info(
+                        "agent %s: poll fallback: retrying failed load (%s)", self.spec.name, self.load_error
+                    )
+                else:
+                    continue
+                await self.reload()
+        except asyncio.CancelledError:
+            pass
 
     def stop_watch(self) -> None:
         subscription, self._subscription = self._subscription, None
@@ -229,6 +314,9 @@ class AgentState:
                 subscription.stop()
             except Exception:
                 logger.exception("agent %s: watcher stop failed", self.spec.name)
+        poll_task, self._poll_task = self._poll_task, None
+        if poll_task is not None:
+            poll_task.cancel()
 
     # ------------------------------------------------------- scheduler (D3)
     def start_schedule(self) -> bool:

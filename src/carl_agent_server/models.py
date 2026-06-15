@@ -102,6 +102,15 @@ class DeploymentSpec(BaseModel):
 
     memory_url: str | None = Field(default=None, description="Memory API base URL; falls back to AGENT_MEMORY_URL")
     memory_api_key: str | None = Field(default=None, description="Memory API key; falls back to AGENT_MEMORY_API_KEY")
+    poll_fallback_s: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Attached mode: also poll the followed channel every N seconds and reload "
+            "on a version change — safety net for when the SSE watcher is silently "
+            "broken (unreachable/misrouted events endpoint). 0 disables polling."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate(self) -> DeploymentSpec:
@@ -120,6 +129,7 @@ class AgentMeta(BaseModel):
     when_to_use: str = ""
     example_task: str = ""
     version_label: str = "unloaded"
+    version_id: str = ""
     entity_id: str | None = None
     channel: str | None = None
     source: Literal["memory", "file"] = "file"

@@ -91,6 +91,15 @@ class MemoryChainSource:
         """
         return self.get_client().watch_chain_record(self.entity_id, callback, channel=self.channel)
 
+    def head(self) -> str:
+        """Identity (version_id) of the followed channel's current version.
+
+        The poll-fallback probe: compared against the serving version to detect
+        promotes the SSE watcher missed. Called in a thread — may block.
+        """
+        record = self.get_client().get_chain_record(self.entity_id, channel=self.channel)
+        return str(getattr(record, "version_id", "") or "")
+
     def load(self) -> ChainSnapshot:
         record = self.get_client().get_chain_record(self.entity_id, channel=self.channel)
         record_meta: dict[str, Any] = dict(getattr(record, "meta", None) or {})
@@ -109,6 +118,7 @@ class MemoryChainSource:
             when_to_use=str(record_meta.get("when_to_use") or ""),
             example_task=str(record_meta.get("task_description") or record_meta.get("query") or ""),
             version_label=version_label,
+            version_id=version_id,
             entity_id=self.entity_id,
             channel=self.channel,
             source="memory",

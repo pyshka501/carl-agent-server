@@ -97,6 +97,50 @@ def test_input_on_non_waiting_run_409(chain_file, mock_llm):
         assert "not waiting" in r.json()["detail"]
 
 
+def test_cancel_while_waiting_ends_cancelled(tmp_path):
+    llm = MockLLM(["never used"])
+    with _client(_write(tmp_path), llm) as client:
+        run_id = client.post("/invoke?mode=async", json={"input": "greet me"}).json()["run_id"]
+        _poll_until(client, run_id, "waiting")
+
+        response = client.delete(f"/runs/{run_id}")
+        assert response.status_code == 200
+        assert response.json()["status"] == "cancelling"
+
+        done = _poll_until(client, run_id, "cancelled")
+        assert done["success"] is False
+        assert "cancelled" in done["error"]
+        assert done["awaiting_input"] is None  # pending prompt cleared
+        assert llm.calls == []  # the chain never reached the llm step
+
+        # the pause is gone — answering now conflicts
+        late = client.post(f"/runs/{run_id}/input", json={"value": "Alice"})
+        assert late.status_code == 409
+
+
+def test_delete_terminal_run_conflicts(tmp_path):
+    """409 is reserved for terminal statuses — here succeeded and cancelled."""
+    llm = MockLLM(["Hello, Alice!"])
+    with _client(_write(tmp_path), llm) as client:
+        # succeeded: complete the pause/resume flow, then try to cancel
+        run_id = client.post("/invoke?mode=async", json={"input": "greet"}).json()["run_id"]
+        _poll_until(client, run_id, "waiting")
+        client.post(f"/runs/{run_id}/input", json={"value": "Alice"})
+        _poll_until(client, run_id, "succeeded")
+        response = client.delete(f"/runs/{run_id}")
+        assert response.status_code == 409
+        assert "succeeded" in response.json()["detail"]
+
+        # cancelled: cancel a waiting run, then cancel again
+        run_id = client.post("/invoke?mode=async", json={"input": "greet"}).json()["run_id"]
+        _poll_until(client, run_id, "waiting")
+        assert client.delete(f"/runs/{run_id}").status_code == 200
+        _poll_until(client, run_id, "cancelled")
+        response = client.delete(f"/runs/{run_id}")
+        assert response.status_code == 409
+        assert "cancelled" in response.json()["detail"]
+
+
 def test_snapshot_persisted_on_pause(tmp_path):
     snap_dir = tmp_path / "snaps"
     llm = MockLLM(["Hi!"])

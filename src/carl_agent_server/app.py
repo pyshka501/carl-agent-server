@@ -196,12 +196,18 @@ def build_agent_app(
 
     @app.delete("/runs/{run_id}", tags=["agent"], dependencies=[require_key])
     async def cancel_run(run_id: str) -> dict[str, str]:
-        """Cooperatively cancel a running run (CARL stops between step batches)."""
+        """Cooperatively cancel a running run (CARL stops between step batches).
+
+        A run paused on a ``human_input`` step (status ``waiting``) is
+        cancellable too: its pending input is abandoned and the run finishes
+        ``cancelled``. 409 only for runs that already reached a terminal state.
+        """
         handle = state.handles.get(run_id)
         if handle is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-        if handle.record.status != "running":
+        if handle.record.status not in ("running", "waiting"):
             raise HTTPException(status_code=409, detail=f"run is already {handle.record.status}")
+        handle.cancel_pending_input()
         handle.request_cancel()
         return {"run_id": run_id, "status": "cancelling"}
 
