@@ -12,8 +12,13 @@ retry/replan machinery can react.
 
 from __future__ import annotations
 
+import asyncio
 import html as _html
+import json
+import logging
+import os
 import re
+import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +26,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from simpleeval import simple_eval
+
+logger = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>|<[^>]+>", re.DOTALL | re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
@@ -108,3 +115,83 @@ def register_builtin_tools(context: Any, *, web_search_api_key: str | None = Non
         context.register_tool("web_search", make_web_search(web_search_api_key))
         names.append("web_search")
     return names
+
+
+# --- bundled (deployment-shipped) synthesized tools -------------------------
+
+_BUNDLED_TOOL_TIMEOUT_S = 30.0
+
+
+def make_bundled_tool(name: str, source: str, *, max_chars: int = 8000) -> Callable[..., Awaitable[str]]:
+    """Wrap a shipped synthesized-tool ``source`` as an async tool.
+
+    Each call runs ``source`` in a FRESH subprocess (a new interpreter), feeding
+    kwargs as JSON on stdin and reading the function's return from stdout — so a
+    deployed agent can call a tool the hub doesn't ship without exec'ing untrusted
+    code inside the long-lived hub process. Not a security sandbox (the subprocess
+    shares the host), but it gives process isolation + a hard timeout."""
+
+    async def _tool(**kwargs: Any) -> str:
+        runner = (
+            source
+            + "\n\nif __name__ == '__main__':\n"
+            "    import json as _j, sys as _sys\n"
+            "    _a = _j.loads(_sys.stdin.read() or '{}')\n"
+            f"    _r = {name}(**_a)\n"
+            "    _sys.stdout.write(_r if isinstance(_r, str) "
+            "else _j.dumps(_r, ensure_ascii=False, default=str))\n"
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", runner,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await asyncio.wait_for(
+                proc.communicate(json.dumps(kwargs, ensure_ascii=False, default=str).encode()),
+                timeout=_BUNDLED_TOOL_TIMEOUT_S,
+            )
+        except TimeoutError:
+            return f"error: bundled tool '{name}' timed out after {_BUNDLED_TOOL_TIMEOUT_S:.0f}s"
+        except Exception as exc:  # noqa: BLE001
+            return f"error: bundled tool '{name}' failed to launch: {exc}"
+        text = out.decode("utf-8", "replace").strip()
+        if not text and proc.returncode:
+            text = "error: " + (err.decode("utf-8", "replace").strip() or f"exit {proc.returncode}")
+        return text[:max_chars]
+
+    return _tool
+
+
+def register_bundled_tools(context: Any, extra_tools: list[Any]) -> list[str]:
+    """Register deployment-shipped synthesized tools (``DeploymentSpec.extra_tools``).
+
+    Gated by ``AGENT_ALLOW_BUNDLED_TOOLS`` (default on) — set it to 0/false to
+    refuse running shipped code. Returns the names registered."""
+    if not extra_tools:
+        return []
+    allow = os.environ.get("AGENT_ALLOW_BUNDLED_TOOLS", "1").strip().lower()
+    if allow in ("0", "false", "no", "off"):
+        logger.warning(
+            "deployment ships %d bundled tool(s) but AGENT_ALLOW_BUNDLED_TOOLS is off — skipping",
+            len(extra_tools),
+        )
+        return []
+    registered: list[str] = []
+    for t in extra_tools:
+        name = getattr(t, "name", None) if not isinstance(t, dict) else t.get("name")
+        source = getattr(t, "source", None) if not isinstance(t, dict) else t.get("source")
+        if not name or not source:
+            continue
+        try:
+            context.register_tool(str(name), make_bundled_tool(str(name), str(source)))
+            registered.append(str(name))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("failed to register bundled tool %r: %s", name, exc)
+    if registered:
+        logger.warning(
+            "registered %d BUNDLED tool(s) (shipped with the deployment, run in subprocess): %s",
+            len(registered), ", ".join(registered),
+        )
+    return registered

@@ -26,7 +26,7 @@ from .models import (
 from .run_records import RunRecorder
 from .sessions import SessionStore, compose_chat_input
 from .timeouts import inject_default_timeouts
-from .tools import register_builtin_tools
+from .tools import register_builtin_tools, register_bundled_tools
 
 logger = logging.getLogger(__name__)
 
@@ -481,6 +481,9 @@ class AgentState:
         language = Language.RUSSIAN if self.spec.language == "ru" else Language.ENGLISH
         ctx = ReasoningContext(outer_context=task_input, api=api or self._get_llm(), language=language)
         register_builtin_tools(ctx, web_search_api_key=os.environ.get(ENV_WEB_SEARCH_KEY))
+        # Synthesized tools shipped with this deployment (not in the builtin set) —
+        # registered to run in an isolated subprocess so the chain can call them.
+        register_bundled_tools(ctx, getattr(self.spec, "extra_tools", []) or [])
         return ctx
 
     def _render_input(self, user_input: str) -> str:

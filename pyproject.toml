@@ -1,6 +1,6 @@
 [project]
 name = "carl-agent-server"
-version = "0.1.0"
+version = "0.1.1"
 description = "Serve CARL reasoning chains as HTTP agents (FastAPI) — per-agent Swagger, hub with hot-reload from gigaevo Memory"
 readme = "README.md"
 license = "MIT"

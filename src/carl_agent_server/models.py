@@ -24,6 +24,21 @@ class ScheduleConfig(BaseModel):
     enabled: bool = Field(default=True, description="Set false to keep the schedule but pause firing")
 
 
+class BundledTool(BaseModel):
+    """A synthesized tool shipped WITH a deployment so the agent can call it.
+
+    The deploying client (CARE) generates these tools locally; the hub doesn't
+    ship them in its read-only builtin set. ``source`` is a standalone Python
+    module defining ``def <name>(**kwargs)``. The hub runs it in an isolated
+    subprocess per call (no in-process exec), so a tool can't corrupt the hub.
+    """
+
+    name: str = Field(..., description="Tool name the chain's tool steps call")
+    source: str = Field(..., description="Python source defining `def <name>(**kwargs) -> str`")
+    params: list[str] = Field(default_factory=list, description="Declared parameter names (advisory)")
+    description: str = Field(default="", description="What the tool does (advisory)")
+
+
 class DeploymentSpec(BaseModel):
     """One agent = one chain + how to run it.
 
@@ -33,6 +48,11 @@ class DeploymentSpec(BaseModel):
     """
 
     name: str = Field(..., description="URL-safe agent name; the hub mounts it at /agents/<name>")
+    extra_tools: list[BundledTool] = Field(
+        default_factory=list,
+        description="Synthesized tools shipped with the chain (not in the builtin set), "
+        "registered into the agent's context and run in an isolated subprocess.",
+    )
     entity_id: str | None = Field(default=None, description="Memory chain entity id (attached mode)")
     channel: str = Field(default="stable", description="Memory channel the agent follows (attached mode)")
     chain_file: str | None = Field(default=None, description="Path to a chain JSON file (offline mode)")
