@@ -33,7 +33,7 @@ from .models import DeploymentInfo, DeploymentSpec
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STATE_FILE = "~/.care/agent-hub.json"
+DEFAULT_STATE_FILE = "~/.maestro/agent-hub.json"
 
 AgentAppFactory = Callable[[DeploymentSpec], FastAPI]
 

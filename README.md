@@ -39,7 +39,7 @@ curl -X POST localhost:8080/deployments \
 open http://localhost:8080/agents/demo/docs   # try POST /invoke from Swagger
 ```
 
-Deployments persist to `--state-file` (default `~/.care/agent-hub.json`) and
+Deployments persist to `--state-file` (default `~/.maestro/agent-hub.json`) and
 are restored on restart; `--no-persist` disables that.
 
 ### Hub control API
